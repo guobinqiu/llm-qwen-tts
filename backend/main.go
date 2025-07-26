@@ -1,3 +1,4 @@
+// https://help.aliyun.com/zh/model-studio/qwen-tts?spm=a2c4g.11186623.0.0.123865c5uWt9vu
 package main
 
 import (
@@ -7,13 +8,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
@@ -180,12 +181,14 @@ func (session *ChatSession) processQuery(ws *websocket.Conn) {
 					})
 
 					// 回答结速了告诉前端要换行
-					ws.WriteMessage(websocket.BinaryMessage, []byte("\n\n"))
+					ws.WriteMessage(websocket.TextMessage, []byte("\n\n"))
 
 					session.textChunkQueue <- "\n\n[END]"
 					break
 				}
+
 				log.Printf("接收流数据失败: %v", err)
+				session.textChunkQueue <- "\n\n[END]"
 				stream.Close()
 				return
 			}
@@ -232,18 +235,26 @@ func AudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 				log.Printf("音频流停止信号收到, 停止音频流处理")
 				return
 			case content := <-session.textChunkQueue:
-				fmt.Println(content)
+				log.Println(content)
+
 				if content == "\n\n[END]" {
 					if buffer.Len() > 0 {
-						session.processTTS(ws, buffer.String())
+						text := filterTTS(buffer.String())
+						session.processTTS(ws, text)
 						buffer.Reset()
+						continue
 					}
 				}
-				if buffer.Len() > 30 {
-					session.processTTS(ws, buffer.String())
+
+				if buffer.Len() > 100 {
+					text := filterTTS(buffer.String())
+					session.processTTS(ws, text)
 					buffer.Reset()
 				}
-				buffer.WriteString(content)
+
+				if content != "" {
+					buffer.WriteString(content)
+				}
 			}
 		}
 	}
@@ -311,10 +322,10 @@ type TTSResponseChunk struct {
 // data:{"output":{"finish_reason":"stop","audio":{"expires_at":1753489635,"id":"audio_2bf82975-d261-947a-9906-552ca8a647e9","data":"","url":"http://dashscope-result-wlcb.oss-cn-wulanchabu.aliyuncs.com/1d/1d/20250725/e6c1b9cc/ff3b8607-be6b-4260-aadd-47a91dd52f31.wav?Expires=1753489635&OSSAccessKeyId=LTAI5tKPD3TMqf2Lna1fASuh&Signature=LdJSRJ%2BKA6mNkBq3tPLfQNBnnMg%3D"}},"usage":{"total_tokens":152,"input_tokens_details":{"text_tokens":17},"output_tokens":135,"input_tokens":17,"output_tokens_details":{"audio_tokens":135,"text_tokens":0}},"request_id":"2bf82975-d261-947a-9906-552ca8a647e9"}
 func (session *ChatSession) processTTS(ws *websocket.Conn, text string) error {
 	ttsReq := TTSRequest{
-		Model: "qwen-tts",
+		Model: "qwen-tts-latest",
 	}
 	ttsReq.Input.Text = text
-	ttsReq.Input.Voice = "Chelsie"
+	ttsReq.Input.Voice = "Cherry" //"Jada"
 
 	reqBodyBytes, err := json.Marshal(ttsReq)
 	if err != nil {
@@ -376,9 +387,7 @@ func (session *ChatSession) processTTS(ws *websocket.Conn, text string) error {
 				}
 			}
 
-			if chunk.Output.FinishReason == "stop" {
-				// 通知AudioStreamHandler
-			}
+			// if chunk.Output.FinishReason == "stop" {}
 		}
 	}
 
@@ -409,4 +418,40 @@ func StopAudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc
 
 		w.Write([]byte("音频流已停止"))
 	}
+}
+
+func removeEmoji(text string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case (r >= 0x1F600 && r <= 0x1F64F), // Emoticons
+			(r >= 0x1F300 && r <= 0x1F5FF), // Misc Symbols and Pictographs
+			(r >= 0x1F680 && r <= 0x1F6FF), // Transport and Map
+			(r >= 0x1F900 && r <= 0x1F9FF), // Supplemental Symbols and Pictographs
+			(r >= 0x1F1E6 && r <= 0x1F1FF), // Regional Indicator Symbols (flags)
+			(r >= 0x2600 && r <= 0x27BF),   // Misc Symbols + Dingbats
+			(r >= 0x1F3FB && r <= 0x1F3FF), // Skin tone modifiers
+			r == 0x200D,                    // Zero Width Joiner
+			r == 0xFE0F:                    // Variation Selector-16
+			return -1
+		default:
+			return r
+		}
+	}, text)
+}
+
+func removeAllPunctuations(text string) string {
+	var builder strings.Builder
+	for _, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) {
+			builder.WriteRune(r)
+		}
+		// 标点符号及其他字符全部忽略
+	}
+	return builder.String()
+}
+
+func filterTTS(text string) string {
+	text = removeEmoji(text)
+	text = removeAllPunctuations(text)
+	return text
 }
