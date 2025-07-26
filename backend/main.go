@@ -138,6 +138,21 @@ func TextStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 		}
 		defer ws.Close()
 
+		// System prompt 一次性调用
+		session.messages = append(session.messages, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleSystem,
+			Content: "说上海话",
+		})
+		content, err := session.CallOpenAI()
+		if err != nil {
+			log.Fatal(err)
+		}
+		session.messages = append(session.messages, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleAssistant,
+			Content: content,
+		})
+
+		// 后续对话用流
 		session.processQuery(ws)
 	}
 }
@@ -239,7 +254,7 @@ func AudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 
 				if content == "\n\n[END]" {
 					if buffer.Len() > 0 {
-						text := filterTTS(buffer.String())
+						text := filter(buffer.String())
 						session.processTTS(ws, text)
 						buffer.Reset()
 						continue
@@ -247,7 +262,7 @@ func AudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 				}
 
 				if buffer.Len() > 100 {
-					text := filterTTS(buffer.String())
+					text := filter(buffer.String())
 					session.processTTS(ws, text)
 					buffer.Reset()
 				}
@@ -325,7 +340,7 @@ func (session *ChatSession) processTTS(ws *websocket.Conn, text string) error {
 		Model: "qwen-tts-latest",
 	}
 	ttsReq.Input.Text = text
-	ttsReq.Input.Voice = "Cherry" //"Jada"
+	ttsReq.Input.Voice = "Jada"
 
 	reqBodyBytes, err := json.Marshal(ttsReq)
 	if err != nil {
@@ -439,7 +454,7 @@ func removeEmoji(text string) string {
 	}, text)
 }
 
-func removeAllPunctuations(text string) string {
+func removePunctuation(text string) string {
 	var builder strings.Builder
 	for _, r := range text {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) {
@@ -450,8 +465,19 @@ func removeAllPunctuations(text string) string {
 	return builder.String()
 }
 
-func filterTTS(text string) string {
+func filter(text string) string {
 	text = removeEmoji(text)
-	text = removeAllPunctuations(text)
+	text = removePunctuation(text)
 	return text
+}
+
+func (session *ChatSession) CallOpenAI() (string, error) {
+	resp, err := session.client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
+		Model:    session.model,
+		Messages: session.messages,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.Choices[0].Message.Content, nil
 }
