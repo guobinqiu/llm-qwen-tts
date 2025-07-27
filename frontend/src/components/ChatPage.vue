@@ -13,17 +13,21 @@
     <div style="margin-top: 20px;">
       <div v-for="(msg, index) in showMessages" :key="index">
         <b>{{ msg.role }}:</b> {{ msg.content }}
+        <button v-if="msg.audioUrl" @click="playAudio(msg.audioUrl)">播放</button>
       </div>
     </div>
   </div>
 </template>
 
 <script>
+import Vue from 'vue';
+
 export default {
   data() {
     return {
       text: '',
-      message: '',
+      //message: '',
+      chunk: {id:'', content:''},
       messages: [],
       sessionID: 'sess1',
       wsText: null,
@@ -37,8 +41,8 @@ export default {
   computed: {
     showMessages() {
       const all = [...this.messages];
-      if (this.message.trim()) {
-        all.push({ role: 'assistant', content: this.message });
+      if (this.chunk.content.trim()) {
+        all.push({ role: 'assistant', content: this.chunk.content, id: this.chunk.id });
       }
       return all;
     }
@@ -69,12 +73,12 @@ export default {
       };
 
       this.wsText.onmessage = (event) => {
-        const chunk = event.data;
-        this.message += chunk;
+        const chunk = JSON.parse(event.data);
+        this.chunk.content += chunk.content;
 
-        if (chunk === '\n\n') {
-          this.messages.push({ role: 'assistant', content: this.message });
-          this.message = '';
+        if (chunk.content === '\n\n') {
+          this.messages.push({ role: 'assistant', content: this.chunk.content, id: chunk.id });
+          this.chunk = { id: '', content: '' };
         }
       };
 
@@ -98,6 +102,18 @@ export default {
       };
 
       this.wsAudio.onmessage = (event) => {
+        if (typeof event.data === "string") {
+          const resp = JSON.parse(event.data)
+
+          console.log("messageID=", resp.messageID, "audioUrl=", resp.audioUrl);
+          const message = this.messages.find(msg => msg.id === resp.messageID);
+          if (message) {
+            //message.audioUrl = resp.audioUrl;
+            Vue.set(message, 'audioUrl', resp.audioUrl);
+          }
+          return
+        }
+
         if (!this.userInteracted) {
           this.resumeAudioContext();
           this.userInteracted = true;
@@ -165,6 +181,12 @@ export default {
       });
       this.audioPlayingNodes = [];
       this.audioQueueTime = this.audioCtx ? this.audioCtx.currentTime : 0;
+    },
+    playAudio(audioUrl) {
+      const audio = new Audio(audioUrl);
+      audio.play().catch(err => {
+        console.log("播放音频时出错:", err);
+      });
     }
   },
   mounted() {

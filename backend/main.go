@@ -16,6 +16,7 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
 	"github.com/sashabaranov/go-openai"
@@ -35,9 +36,15 @@ type ChatSession struct {
 	client          *openai.Client
 	model           string
 	messages        []openai.ChatCompletionMessage
-	textChunkQueue  chan string
+	textChunkQueue  chan TextChunk
 	dashscopeApiKey string
 	stopAudioSignal chan struct{}
+}
+
+type TextChunk struct {
+	ID      string `json:"id"` // 为了该死的文本和音频同步
+	Content string `json:"content"`
+	URL     string `json:"url"` // 为了除了流式播放还可以听回放
 }
 
 func NewChatSessionManager() (*ChatSessionManager, error) {
@@ -67,7 +74,7 @@ func (m *ChatSessionManager) NewChatSession(sessionID string) (*ChatSession, err
 		model:           model,
 		messages:        make([]openai.ChatCompletionMessage, 0),
 		dashscopeApiKey: dashscopeApiKey,
-		textChunkQueue:  make(chan string, 10000),
+		textChunkQueue:  make(chan TextChunk, 10000),
 		stopAudioSignal: make(chan struct{}),
 	}
 
@@ -139,18 +146,18 @@ func TextStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 		defer ws.Close()
 
 		// System prompt 一次性调用
-		session.messages = append(session.messages, openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleSystem,
-			Content: "说上海话",
-		})
-		content, err := session.CallOpenAI()
-		if err != nil {
-			log.Fatal(err)
-		}
-		session.messages = append(session.messages, openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleAssistant,
-			Content: content,
-		})
+		// session.messages = append(session.messages, openai.ChatCompletionMessage{
+		// 	Role:    openai.ChatMessageRoleSystem,
+		// 	Content: "说上海话",
+		// })
+		// content, err := session.CallOpenAI()
+		// if err != nil {
+		// 	log.Fatal(err)
+		// }
+		// session.messages = append(session.messages, openai.ChatCompletionMessage{
+		// 	Role:    openai.ChatMessageRoleAssistant,
+		// 	Content: content,
+		// })
 
 		// 后续对话用流
 		session.processQuery(ws)
@@ -171,6 +178,8 @@ func (session *ChatSession) processQuery(ws *websocket.Conn) {
 			Content: string(msgBytes),
 		})
 
+		messageID := uuid.New().String()
+
 		var finalAnswer strings.Builder
 
 		stream, err := session.client.CreateChatCompletionStream(context.Background(), openai.ChatCompletionRequest{
@@ -185,7 +194,13 @@ func (session *ChatSession) processQuery(ws *websocket.Conn) {
 
 		for {
 			resp, err := stream.Recv()
+
 			if err != nil {
+				textChunk := TextChunk{
+					ID:      messageID,
+					Content: "\n\n",
+				}
+
 				if errors.Is(err, io.EOF) {
 					log.Println("stream finished")
 
@@ -196,14 +211,14 @@ func (session *ChatSession) processQuery(ws *websocket.Conn) {
 					})
 
 					// 回答结速了告诉前端要换行
-					ws.WriteMessage(websocket.TextMessage, []byte("\n\n"))
+					ws.WriteJSON(textChunk)
 
-					session.textChunkQueue <- "\n\n[END]"
+					session.textChunkQueue <- textChunk
 					break
 				}
 
 				log.Printf("接收流数据失败: %v", err)
-				session.textChunkQueue <- "\n\n[END]"
+				session.textChunkQueue <- textChunk
 				stream.Close()
 				return
 			}
@@ -211,8 +226,14 @@ func (session *ChatSession) processQuery(ws *websocket.Conn) {
 			choice := resp.Choices[0]
 			content := choice.Delta.Content
 			finalAnswer.WriteString(content)
-			session.textChunkQueue <- content
-			if err := ws.WriteMessage(websocket.TextMessage, []byte(content)); err != nil {
+
+			textChunk := TextChunk{
+				ID:      messageID,
+				Content: content,
+			}
+			session.textChunkQueue <- textChunk
+
+			if err := ws.WriteJSON(textChunk); err != nil {
 				log.Printf("websocket write error: %v", err)
 				break
 			}
@@ -249,13 +270,13 @@ func AudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 			case <-session.stopAudioSignal:
 				log.Printf("音频流停止信号收到, 停止音频流处理")
 				return
-			case content := <-session.textChunkQueue:
-				log.Println(content)
+			case textChunk := <-session.textChunkQueue:
+				log.Println(textChunk.Content)
 
-				if content == "\n\n[END]" {
+				if textChunk.Content == "\n\n" {
 					if buffer.Len() > 0 {
 						text := filter(buffer.String())
-						session.processTTS(ws, text)
+						session.processTTS(ws, text, textChunk.ID)
 						buffer.Reset()
 						continue
 					}
@@ -267,8 +288,8 @@ func AudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 					buffer.Reset()
 				}
 
-				if content != "" {
-					buffer.WriteString(content)
+				if textChunk.Content != "" {
+					buffer.WriteString(textChunk.Content)
 				}
 			}
 		}
@@ -335,7 +356,7 @@ type TTSResponseChunk struct {
 // event:result
 // :HTTP_STATUS/200
 // data:{"output":{"finish_reason":"stop","audio":{"expires_at":1753489635,"id":"audio_2bf82975-d261-947a-9906-552ca8a647e9","data":"","url":"http://dashscope-result-wlcb.oss-cn-wulanchabu.aliyuncs.com/1d/1d/20250725/e6c1b9cc/ff3b8607-be6b-4260-aadd-47a91dd52f31.wav?Expires=1753489635&OSSAccessKeyId=LTAI5tKPD3TMqf2Lna1fASuh&Signature=LdJSRJ%2BKA6mNkBq3tPLfQNBnnMg%3D"}},"usage":{"total_tokens":152,"input_tokens_details":{"text_tokens":17},"output_tokens":135,"input_tokens":17,"output_tokens_details":{"audio_tokens":135,"text_tokens":0}},"request_id":"2bf82975-d261-947a-9906-552ca8a647e9"}
-func (session *ChatSession) processTTS(ws *websocket.Conn, text string) error {
+func (session *ChatSession) processTTS(ws *websocket.Conn, text string, messageID ...string) error {
 	ttsReq := TTSRequest{
 		Model: "qwen-tts-latest",
 	}
@@ -402,7 +423,15 @@ func (session *ChatSession) processTTS(ws *websocket.Conn, text string) error {
 				}
 			}
 
-			// if chunk.Output.FinishReason == "stop" {}
+			if len(messageID) > 0 {
+				if chunk.Output.FinishReason == "stop" && chunk.Output.Audio.URL != "" {
+					if err := ws.WriteJSON(map[string]string{
+						"messageID": messageID[0],
+						"audioUrl":  chunk.Output.Audio.URL}); err != nil {
+						return err
+					}
+				}
+			}
 		}
 	}
 
