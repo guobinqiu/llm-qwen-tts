@@ -145,19 +145,19 @@ func TextStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 		}
 		defer ws.Close()
 
-		//	System prompt 一次性调用
-		session.messages = append(session.messages, openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleSystem,
-			Content: "你是一个精打细算会过日子的家庭主妇",
-		})
-		content, err := session.CallOpenAI()
-		if err != nil {
-			log.Fatal(err)
-		}
-		session.messages = append(session.messages, openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleAssistant,
-			Content: content,
-		})
+		// System prompt 一次性调用
+		// session.messages = append(session.messages, openai.ChatCompletionMessage{
+		// 	Role:    openai.ChatMessageRoleSystem,
+		// 	Content: "你是一个精打细算会过日子的家庭主妇",
+		// })
+		// content, err := session.CallOpenAI()
+		// if err != nil {
+		// 	log.Fatal(err)
+		// }
+		// session.messages = append(session.messages, openai.ChatCompletionMessage{
+		// 	Role:    openai.ChatMessageRoleAssistant,
+		// 	Content: content,
+		// })
 
 		// 后续对话用流
 		session.processQuery(ws)
@@ -273,6 +273,7 @@ func AudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 			case textChunk := <-session.textChunkQueue:
 				log.Println(textChunk.Content)
 
+				// 完整的回答结束了调用一次tts
 				if textChunk.Content == "\n\n" {
 					if buffer.Len() > 0 {
 						text := filter(buffer.String())
@@ -282,11 +283,13 @@ func AudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 					}
 				}
 
-				if buffer.Len() > 100 {
-					text := filter(buffer.String())
-					session.processTTS(ws, text)
-					buffer.Reset()
-				}
+				// 不要分段了,音频管理异常复杂
+				// 每凑够100字节调用一次tts
+				// if buffer.Len() > 100 {
+				// 	text := filter(buffer.String())
+				// 	session.processTTS(ws, text, textChunk.ID)
+				// 	buffer.Reset()
+				// }
 
 				if textChunk.Content != "" {
 					buffer.WriteString(textChunk.Content)
@@ -356,12 +359,12 @@ type TTSResponseChunk struct {
 // event:result
 // :HTTP_STATUS/200
 // data:{"output":{"finish_reason":"stop","audio":{"expires_at":1753489635,"id":"audio_2bf82975-d261-947a-9906-552ca8a647e9","data":"","url":"http://dashscope-result-wlcb.oss-cn-wulanchabu.aliyuncs.com/1d/1d/20250725/e6c1b9cc/ff3b8607-be6b-4260-aadd-47a91dd52f31.wav?Expires=1753489635&OSSAccessKeyId=LTAI5tKPD3TMqf2Lna1fASuh&Signature=LdJSRJ%2BKA6mNkBq3tPLfQNBnnMg%3D"}},"usage":{"total_tokens":152,"input_tokens_details":{"text_tokens":17},"output_tokens":135,"input_tokens":17,"output_tokens_details":{"audio_tokens":135,"text_tokens":0}},"request_id":"2bf82975-d261-947a-9906-552ca8a647e9"}
-func (session *ChatSession) processTTS(ws *websocket.Conn, text string, messageID ...string) error {
+func (session *ChatSession) processTTS(ws *websocket.Conn, text string, messageID string) error {
 	ttsReq := TTSRequest{
 		Model: "qwen-tts-latest",
 	}
 	ttsReq.Input.Text = text
-	ttsReq.Input.Voice = "Jada"
+	ttsReq.Input.Voice = "Chelsie" // Jada
 
 	reqBodyBytes, err := json.Marshal(ttsReq)
 	if err != nil {
@@ -423,13 +426,11 @@ func (session *ChatSession) processTTS(ws *websocket.Conn, text string, messageI
 				}
 			}
 
-			if len(messageID) > 0 {
-				if chunk.Output.FinishReason == "stop" && chunk.Output.Audio.URL != "" {
-					if err := ws.WriteJSON(map[string]string{
-						"messageID": messageID[0],
-						"audioUrl":  chunk.Output.Audio.URL}); err != nil {
-						return err
-					}
+			if chunk.Output.FinishReason == "stop" && chunk.Output.Audio.URL != "" {
+				if err := ws.WriteJSON(map[string]string{
+					"messageID": messageID,
+					"audioUrl":  chunk.Output.Audio.URL}); err != nil {
+					return err
 				}
 			}
 		}
