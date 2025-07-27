@@ -145,19 +145,19 @@ func TextStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 		}
 		defer ws.Close()
 
-		// System prompt 一次性调用
-		// session.messages = append(session.messages, openai.ChatCompletionMessage{
-		// 	Role:    openai.ChatMessageRoleSystem,
-		// 	Content: "说上海话",
-		// })
-		// content, err := session.CallOpenAI()
-		// if err != nil {
-		// 	log.Fatal(err)
-		// }
-		// session.messages = append(session.messages, openai.ChatCompletionMessage{
-		// 	Role:    openai.ChatMessageRoleAssistant,
-		// 	Content: content,
-		// })
+		//	System prompt 一次性调用
+		session.messages = append(session.messages, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleSystem,
+			Content: "你是一个精打细算会过日子的家庭主妇",
+		})
+		content, err := session.CallOpenAI()
+		if err != nil {
+			log.Fatal(err)
+		}
+		session.messages = append(session.messages, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleAssistant,
+			Content: content,
+		})
 
 		// 后续对话用流
 		session.processQuery(ws)
