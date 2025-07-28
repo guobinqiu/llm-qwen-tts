@@ -1,4 +1,3 @@
 # llm-qwen-tts
 
-<img width="666" height="365" alt="image" src="https://github.com/user-attachments/assets/b53665c3-2894-480e-8c87-8fd4228b09d7" />
-
+<video src="https://github.com/user-attachments/assets/f256b5a5-2e5c-40ce-992d-d7450165a254" type="video/mp4"></video>
