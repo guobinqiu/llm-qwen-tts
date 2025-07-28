@@ -263,7 +263,8 @@ func AudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 		}
 		defer ws.Close()
 
-		var buffer bytes.Buffer
+		var segmentBuffer bytes.Buffer // 部分回答
+		var wholeBuffer bytes.Buffer   // 完整回答
 
 		for {
 			select {
@@ -275,24 +276,28 @@ func AudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 
 				// 完整的回答结束了调用一次tts
 				if textChunk.Content == "\n\n" {
-					if buffer.Len() > 0 {
-						text := filter(buffer.String())
-						session.processTTS(ws, text, textChunk.ID)
-						buffer.Reset()
-						continue
+					if segmentBuffer.Len() > 0 {
+						session.processTTS(ws, filter(segmentBuffer.String()), textChunk.ID, true)
+						segmentBuffer.Reset()
 					}
+
+					if wholeBuffer.Len() > 0 {
+						session.processTTS(ws, filter(wholeBuffer.String()), textChunk.ID, false)
+						wholeBuffer.Reset()
+					}
+
+					continue
 				}
 
-				// 不要分段了,音频管理异常复杂
 				// 每凑够100字节调用一次tts
-				// if buffer.Len() > 100 {
-				// 	text := filter(buffer.String())
-				// 	session.processTTS(ws, text, textChunk.ID)
-				// 	buffer.Reset()
-				// }
+				if segmentBuffer.Len() > 100 {
+					session.processTTS(ws, filter(segmentBuffer.String()), textChunk.ID, true)
+					segmentBuffer.Reset()
+				}
 
 				if textChunk.Content != "" {
-					buffer.WriteString(textChunk.Content)
+					segmentBuffer.WriteString(textChunk.Content)
+					wholeBuffer.WriteString(textChunk.Content)
 				}
 			}
 		}
@@ -359,12 +364,12 @@ type TTSResponseChunk struct {
 // event:result
 // :HTTP_STATUS/200
 // data:{"output":{"finish_reason":"stop","audio":{"expires_at":1753489635,"id":"audio_2bf82975-d261-947a-9906-552ca8a647e9","data":"","url":"http://dashscope-result-wlcb.oss-cn-wulanchabu.aliyuncs.com/1d/1d/20250725/e6c1b9cc/ff3b8607-be6b-4260-aadd-47a91dd52f31.wav?Expires=1753489635&OSSAccessKeyId=LTAI5tKPD3TMqf2Lna1fASuh&Signature=LdJSRJ%2BKA6mNkBq3tPLfQNBnnMg%3D"}},"usage":{"total_tokens":152,"input_tokens_details":{"text_tokens":17},"output_tokens":135,"input_tokens":17,"output_tokens_details":{"audio_tokens":135,"text_tokens":0}},"request_id":"2bf82975-d261-947a-9906-552ca8a647e9"}
-func (session *ChatSession) processTTS(ws *websocket.Conn, text string, messageID string) error {
+func (session *ChatSession) processTTS(ws *websocket.Conn, text string, messageID string, isSegment bool) error {
 	ttsReq := TTSRequest{
 		Model: "qwen-tts-latest",
 	}
 	ttsReq.Input.Text = text
-	ttsReq.Input.Voice = "Chelsie" // Jada
+	ttsReq.Input.Voice = "Chelsie"
 
 	reqBodyBytes, err := json.Marshal(ttsReq)
 	if err != nil {
@@ -413,23 +418,27 @@ func (session *ChatSession) processTTS(ws *websocket.Conn, text string, messageI
 				continue
 			}
 
-			// 如果包含 base64 音频数据，解码并发送
-			if chunk.Output.Audio.Data != "" {
-				audioBytes, err := base64.StdEncoding.DecodeString(chunk.Output.Audio.Data)
-				if err != nil {
-					log.Println("base64解码失败:", err)
-					continue
-				}
+			if isSegment {
+				// 如果包含 base64 音频数据，解码并发送
+				if chunk.Output.Audio.Data != "" {
+					audioBytes, err := base64.StdEncoding.DecodeString(chunk.Output.Audio.Data)
+					if err != nil {
+						log.Println("base64解码失败:", err)
+						continue
+					}
 
-				if err := ws.WriteMessage(websocket.BinaryMessage, audioBytes); err != nil {
-					return err
+					if err := ws.WriteMessage(websocket.BinaryMessage, audioBytes); err != nil {
+						return err
+					}
 				}
 			}
 
 			if chunk.Output.FinishReason == "stop" && chunk.Output.Audio.URL != "" {
-				if err := ws.WriteJSON(map[string]string{
+				if err := ws.WriteJSON(map[string]any{
 					"messageID": messageID,
-					"audioUrl":  chunk.Output.Audio.URL}); err != nil {
+					"audioUrl":  chunk.Output.Audio.URL,
+					"isSegment": isSegment,
+				}); err != nil {
 					return err
 				}
 			}

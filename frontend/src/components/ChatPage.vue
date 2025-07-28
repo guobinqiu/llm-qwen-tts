@@ -13,7 +13,7 @@
     <div style="margin-top: 20px;">
       <div v-for="(msg, index) in showMessages" :key="index">
         <b>{{ msg.role }}:</b> {{ msg.content }}
-        <button v-if="msg.audioUrl" @click="playAudio(msg.audioUrl, msg)">
+        <button v-if="msg.audioUrl && !isSegmentPlaying" @click="playAudio(msg.audioUrl, msg)">
           {{ msg.isPlaying ? '暂停' : '朗读' }}
         </button>
       </div>
@@ -22,8 +22,6 @@
 </template>
 
 <script>
-import Vue from 'vue';
-
 export default {
   data() {
     return {
@@ -34,15 +32,23 @@ export default {
       wsText: null,
       wsAudio: null,
       audioCtx: null,
-      // audioPlayingNodes: [],
-      // audioQueueTime: 0, // 新增：下一个音频块播放的起始时间
+      audioPlayingNodes: [],
+      audioQueueTime: 0, // 新增：下一个音频块播放的起始时间
+      isSegmentPlaying: false,
     };
   },
   computed: {
     showMessages() {
       const all = [...this.messages];
       if (this.chunk.content.trim()) {
-        all.push({ role: 'assistant', content: this.chunk.content, id: this.chunk.id });
+        all.push({
+          role: 'assistant',
+          content: this.chunk.content,
+          id: this.chunk.id,
+          isPlaying: false,
+          audioUrl: '',
+          audioElement: null
+        })
       }
       return all;
     }
@@ -51,7 +57,14 @@ export default {
     sendText() {
       if (!this.text.trim()) return;
       this.wsText.send(this.text.trim());
-      this.messages.push({ role: 'user', content: this.text.trim() });
+      this.messages.push({
+        role: 'user',
+        content: this.text.trim(),
+        id: '',
+        isPlaying: false,
+        audioUrl: '', 
+        audioElement: null
+      });
       this.text = '';
     },
     setupTextSocket() {
@@ -66,7 +79,14 @@ export default {
         this.chunk.content += chunk.content;
 
         if (chunk.content === '\n\n') {
-          this.messages.push({ role: 'assistant', content: this.chunk.content, id: chunk.id });
+          this.messages.push({ 
+            role: 'assistant', 
+            content: this.chunk.content, 
+            id: chunk.id, 
+            isPlaying: false,
+            audioUrl: '', 
+            audioElement: null 
+          });
           this.chunk = { id: '', content: '' };
         }
       };
@@ -81,7 +101,7 @@ export default {
     },
     setupAudioSocket() {
       this.audioCtx = new AudioContext();
-      // this.audioQueueTime = this.audioCtx.currentTime;
+      this.audioQueueTime = this.audioCtx.currentTime;
 
       this.wsAudio = new WebSocket(`ws://localhost:8080/ws/audio-stream?sessionid=${this.sessionID}`);
       this.wsAudio.binaryType = 'arraybuffer';
@@ -91,64 +111,64 @@ export default {
       };
 
       this.wsAudio.onmessage = (event) => {
-        // 一次性播放
         if (typeof event.data === "string") {
           const resp = JSON.parse(event.data)
-
           console.log("messageID=", resp.messageID, "audioUrl=", resp.audioUrl);
+
           const message = this.messages.find(msg => msg.id === resp.messageID);
-          if (message) {
-            Vue.set(message, 'audioUrl', resp.audioUrl);
-            Vue.set(message, 'isPlaying', false);
-            Vue.set(message, 'audioElement', null); // 初始没有音频元素
+          if (resp.isSegment) {
+            console.log("收到最后一个音频片段")
+            console.log(resp.audioUrl)
+            this.isSegmentPlaying = false;
+          } else {
+            console.log("收到完整音频")
+            console.log(resp.audioUrl)
+            message.audioUrl = resp.audioUrl;
+            message.isPlaying = false;
           }
+        } else { // 播放多个音频片段
+          this.isSegmentPlaying = true;
+          const arrayBuffer = event.data;
+          console.log('接收到音频数据，字节长度:', arrayBuffer.byteLength);
 
-          // 默认播放
-          this.playAudio(resp.audioUrl, message)
+          try {
+            // 后端是16位PCM，采样率24000Hz
+            // 注意用DataView逐个读取确保小端
+            const dataView = new DataView(arrayBuffer);
+            const length = arrayBuffer.byteLength / 2;
+            const float32Data = new Float32Array(length);
+            for (let i = 0; i < length; i++) {
+              const int16 = dataView.getInt16(i * 2, true); // true = little endian
+              float32Data[i] = int16 / 32768;
+            }
+
+            const sampleRate = 24000;
+
+            const audioBuffer = this.audioCtx.createBuffer(1, float32Data.length, sampleRate);
+            audioBuffer.getChannelData(0).set(float32Data);
+
+            const source = this.audioCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(this.audioCtx.destination);
+
+            // 按队列时间安排播放，避免重叠和跳过
+            const now = this.audioCtx.currentTime;
+            const startAt = Math.max(this.audioQueueTime, now);
+            source.start(startAt);
+            this.audioQueueTime = startAt + audioBuffer.duration;
+
+            source.onended = () => {
+              const idx = this.audioPlayingNodes.indexOf(source);
+              if (idx !== -1) this.audioPlayingNodes.splice(idx, 1);
+            };
+
+            this.audioPlayingNodes.push(source);
+
+            console.log(`播放音频块: 样本数=${float32Data.length}, 播放时长=${audioBuffer.duration.toFixed(3)}秒, 计划开始时间=${startAt.toFixed(3)}`);
+          } catch (err) {
+            console.error('播放音频数据失败:', err);
+          }
         }
-
-        // 流式播放
-        // try {
-        //   const arrayBuffer = event.data;
-        //   console.log('接收到音频数据，字节长度:', arrayBuffer.byteLength);
-
-        //   // 后端是16位PCM，采样率24000Hz
-        //   // 注意用DataView逐个读取确保小端
-        //   const dataView = new DataView(arrayBuffer);
-        //   const length = arrayBuffer.byteLength / 2;
-        //   const float32Data = new Float32Array(length);
-        //   for (let i = 0; i < length; i++) {
-        //     const int16 = dataView.getInt16(i * 2, true); // true = little endian
-        //     float32Data[i] = int16 / 32768;
-        //   }
-
-        //   const sampleRate = 24000;
-
-        //   const audioBuffer = this.audioCtx.createBuffer(1, float32Data.length, sampleRate);
-        //   audioBuffer.getChannelData(0).set(float32Data);
-
-        //   const source = this.audioCtx.createBufferSource();
-        //   source.buffer = audioBuffer;
-        //   source.connect(this.audioCtx.destination);
-
-        //   // 按队列时间安排播放，避免重叠和跳过
-        //   const now = this.audioCtx.currentTime;
-        //   const startAt = Math.max(this.audioQueueTime, now);
-        //   source.start(startAt);
-        //   this.audioQueueTime = startAt + audioBuffer.duration;
-
-        //   source.onended = () => {
-        //     const idx = this.audioPlayingNodes.indexOf(source);
-        //     if (idx !== -1) this.audioPlayingNodes.splice(idx, 1);
-        //   };
-
-        //   this.audioPlayingNodes.push(source);
-
-        //   console.log(`播放音频块: 样本数=${float32Data.length}, 播放时长=${audioBuffer.duration.toFixed(3)}秒, 计划开始时间=${startAt.toFixed(3)}`);
-
-        // } catch (err) {
-        //   console.error('播放音频数据失败:', err);
-        // }
       };
 
       this.wsAudio.onerror = (e) => {
@@ -157,20 +177,20 @@ export default {
 
       this.wsAudio.onclose = () => {
         console.log('音频 WebSocket 已关闭');
-        // this.stopAllAudio();
+        this.stopAllAudio();
       };
     },
-    // stopAllAudio() {
-    //   this.audioPlayingNodes.forEach(node => {
-    //     try {
-    //       node.stop();
-    //     } catch (e) {
-    //       console.error('停止音频节点失败:', e);
-    //     }
-    //   });
-    //   this.audioPlayingNodes = [];
-    //   this.audioQueueTime = this.audioCtx ? this.audioCtx.currentTime : 0;
-    // },
+    stopAllAudio() {
+      this.audioPlayingNodes.forEach(node => {
+        try {
+          node.stop();
+        } catch (e) {
+          console.error('停止音频节点失败:', e);
+        }
+      });
+      this.audioPlayingNodes = [];
+      this.audioQueueTime = this.audioCtx ? this.audioCtx.currentTime : 0;
+    },
     playAudio(audioUrl, msg) {
       if (msg.isPlaying) {
         msg.audioElement.pause();
@@ -201,7 +221,7 @@ export default {
   beforeDestroy() {
     if (this.wsText) this.wsText.close();
     if (this.wsAudio) this.wsAudio.close();
-    // this.stopAllAudio();
+    this.stopAllAudio();
     if (this.audioCtx) this.audioCtx.close();
   }
 };
