@@ -290,7 +290,13 @@ func AudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 				}
 
 				// 每凑够100字节调用一次tts
-				if segmentBuffer.Len() > 100 {
+				// if segmentBuffer.Len() > 100 {
+				if textChunk.Content == "." ||
+					textChunk.Content == "!" ||
+					textChunk.Content == "?" ||
+					textChunk.Content == "。" ||
+					textChunk.Content == "！" ||
+					textChunk.Content == "？" {
 					session.processTTS(ws, filter(segmentBuffer.String()), textChunk.ID, true)
 					segmentBuffer.Reset()
 				}
