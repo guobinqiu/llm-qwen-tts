@@ -110,14 +110,12 @@ func main() {
 		log.Fatalf("创建会话失败: %v", err)
 	}
 	defer session1.StopAudioStream()
-	// close(session1.textChunkQueue)
 
 	session2, err := sessionManager.NewChatSession("sess2")
 	if err != nil {
 		log.Fatalf("创建会话失败: %v", err)
 	}
 	defer session2.StopAudioStream()
-	// close(session2.textChunkQueue)
 
 	sessionManager.AddSession(session1)
 	sessionManager.AddSession(session2)
@@ -166,10 +164,6 @@ func TextStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 		// 	Role:    openai.ChatMessageRoleAssistant,
 		// 	Content: content,
 		// })
-
-		// 清空队列
-		// session.StopAudioStream()
-		// session.textChunkQueue = make(chan TextChunk, 10000)
 
 		// 后续对话用流
 		session.processQuery(ws)
@@ -471,6 +465,7 @@ func (session *ChatSession) processTTS(ws *websocket.Conn, text string, messageI
 
 func (session *ChatSession) StopAudioStream() {
 	session.ctrlCh <- StateStopped
+	// close(session.textChunkQueue)
 }
 
 func (session *ChatSession) PauseAudioStream() {

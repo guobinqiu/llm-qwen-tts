@@ -13,9 +13,14 @@
     <div style="margin-top: 20px;">
       <div v-for="(msg, index) in showMessages" :key="index">
         <b>{{ msg.role }}:</b> {{ msg.content }}
-        <button v-if="msg.audioUrl && !isSegmentPlaying" @click="playAudio(msg.audioUrl, msg)">
-          {{ msg.isPlaying ? '暂停' : '朗读' }}
-        </button>
+        <div>
+          <button v-if="msg.role === 'assistant' && !msg.audioUrl" @click="playAudioSegment()">
+            {{ isSegmentPlaying ? '暂停' : '朗读' }}
+          </button>
+          <button v-if="msg.role === 'assistant' && msg.audioUrl && !isSegmentPlaying" @click="playAudio(msg.audioUrl, msg)">
+            {{ msg.isPlaying ? '暂停' : '朗读' }}
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -212,6 +217,38 @@ export default {
         }
         msg.isPlaying = true;
       }
+    },
+    playAudioSegment() {
+      if (this.isSegmentPlaying) {
+        this.pauseAudioSegment();
+      } else {
+        this.resumeAudioSegment();
+      }
+    },
+    pauseAudioSegment() {
+      this.isSegmentPlaying = false;
+      this.audioCtx.suspend()
+
+      console.log("pauseAudioSegment")
+      fetch(`http://localhost:8080/pause-audio-stream?sessionid=${this.sessionID}`, {
+        method: 'GET',
+      })
+        .then(response => response.text())
+        .then(data => console.log(data))
+        .catch(err => console.error("暂停音频失败", err));
+    },
+
+    resumeAudioSegment() {
+      this.isSegmentPlaying = true;
+      this.audioCtx.resume()
+
+      console.log("resumeAudioSegment")
+      fetch(`http://localhost:8080/play-audio-stream?sessionid=${this.sessionID}`, {
+        method: 'GET',
+      })
+        .then(response => response.text())
+        .then(data => console.log(data))
+        .catch(err => console.error("播放音频失败", err));
     }
   },
   mounted() {
@@ -230,5 +267,25 @@ export default {
 <style scoped>
 input {
   margin-right: 8px;
+}
+</style>
+<style scoped>
+.chat-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+.chat-input {
+  display: flex;
+  align-items: center;
+  padding: 8px;
+}
+.chat-input input {
+  flex: 1;
 }
 </style>
