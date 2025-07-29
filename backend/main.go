@@ -22,6 +22,12 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
+const (
+	StateRunning = "running"
+	StatePaused  = "paused"
+	StateStopped = "stopped"
+)
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
@@ -38,7 +44,7 @@ type ChatSession struct {
 	messages        []openai.ChatCompletionMessage
 	textChunkQueue  chan TextChunk
 	dashscopeApiKey string
-	stopAudioSignal chan struct{}
+	ctrlCh          chan string
 }
 
 type TextChunk struct {
@@ -75,7 +81,7 @@ func (m *ChatSessionManager) NewChatSession(sessionID string) (*ChatSession, err
 		messages:        make([]openai.ChatCompletionMessage, 0),
 		dashscopeApiKey: dashscopeApiKey,
 		textChunkQueue:  make(chan TextChunk, 10000),
-		stopAudioSignal: make(chan struct{}),
+		ctrlCh:          make(chan string),
 	}
 
 	return session, nil
@@ -104,21 +110,23 @@ func main() {
 		log.Fatalf("创建会话失败: %v", err)
 	}
 	defer session1.StopAudioStream()
-	//close(session1.textChunkQueue)
+	// close(session1.textChunkQueue)
 
 	session2, err := sessionManager.NewChatSession("sess2")
 	if err != nil {
 		log.Fatalf("创建会话失败: %v", err)
 	}
 	defer session2.StopAudioStream()
-	//close(session2.textChunkQueue)
+	// close(session2.textChunkQueue)
 
 	sessionManager.AddSession(session1)
 	sessionManager.AddSession(session2)
 
-	http.HandleFunc("/ws/text-stream", TextStreamHandler(sessionManager))
-	http.HandleFunc("/ws/audio-stream", AudioStreamHandler(sessionManager))
-	http.HandleFunc("/ws/stop-audio-stream", StopAudioStreamHandler(sessionManager))
+	http.HandleFunc("/ws/text-stream", withCORS(TextStreamHandler(sessionManager)))
+	http.HandleFunc("/ws/audio-stream", withCORS(AudioStreamHandler(sessionManager)))
+	http.HandleFunc("/stop-audio-stream", withCORS(StopAudioStreamHandler(sessionManager)))
+	http.HandleFunc("/pause-audio-stream", withCORS(PauseAudioStreamHandler(sessionManager)))
+	http.HandleFunc("/play-audio-stream", withCORS(PlayAudioStreamHandler(sessionManager)))
 
 	log.Println("服务启动于 :8080")
 	http.ListenAndServe(":8080", nil)
@@ -158,6 +166,10 @@ func TextStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 		// 	Role:    openai.ChatMessageRoleAssistant,
 		// 	Content: content,
 		// })
+
+		// 清空队列
+		// session.StopAudioStream()
+		// session.textChunkQueue = make(chan TextChunk, 10000)
 
 		// 后续对话用流
 		session.processQuery(ws)
@@ -266,38 +278,47 @@ func AudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
 		var segmentBuffer bytes.Buffer // 部分回答
 		var wholeBuffer bytes.Buffer   // 完整回答
 
-		for {
-			select {
-			case <-session.stopAudioSignal:
-				log.Printf("音频流停止信号收到, 停止音频流处理")
-				return
-			case textChunk := <-session.textChunkQueue:
-				log.Println(textChunk.Content)
+		state := StateRunning
 
-				// 完整的回答结束了调用一次tts
-				if textChunk.Content == "\n\n" {
-					if segmentBuffer.Len() > 0 {
+		for {
+			switch state {
+			case StatePaused:
+				state = <-session.ctrlCh
+				continue
+			case StateStopped:
+				return
+			case StateRunning:
+				select {
+				case newState := <-session.ctrlCh:
+					state = newState
+				case textChunk := <-session.textChunkQueue:
+					log.Println(textChunk.Content)
+
+					// 完整的回答结束了调用一次tts
+					if textChunk.Content == "\n\n" {
+						if segmentBuffer.Len() > 0 {
+							session.processTTS(ws, filter(segmentBuffer.String()), textChunk.ID, true)
+							segmentBuffer.Reset()
+						}
+
+						if wholeBuffer.Len() > 0 {
+							session.processTTS(ws, filter(wholeBuffer.String()), textChunk.ID, false)
+							wholeBuffer.Reset()
+						}
+
+						continue
+					}
+
+					// 每凑够100字节调用一次tts
+					if segmentBuffer.Len() > 100 {
 						session.processTTS(ws, filter(segmentBuffer.String()), textChunk.ID, true)
 						segmentBuffer.Reset()
 					}
 
-					if wholeBuffer.Len() > 0 {
-						session.processTTS(ws, filter(wholeBuffer.String()), textChunk.ID, false)
-						wholeBuffer.Reset()
+					if textChunk.Content != "" {
+						segmentBuffer.WriteString(textChunk.Content)
+						wholeBuffer.WriteString(textChunk.Content)
 					}
-
-					continue
-				}
-
-				// 每凑够100字节调用一次tts
-				if segmentBuffer.Len() > 100 {
-					session.processTTS(ws, filter(segmentBuffer.String()), textChunk.ID, true)
-					segmentBuffer.Reset()
-				}
-
-				if textChunk.Content != "" {
-					segmentBuffer.WriteString(textChunk.Content)
-					wholeBuffer.WriteString(textChunk.Content)
 				}
 			}
 		}
@@ -449,7 +470,15 @@ func (session *ChatSession) processTTS(ws *websocket.Conn, text string, messageI
 }
 
 func (session *ChatSession) StopAudioStream() {
-	close(session.stopAudioSignal)
+	session.ctrlCh <- StateStopped
+}
+
+func (session *ChatSession) PauseAudioStream() {
+	session.ctrlCh <- StatePaused
+}
+
+func (session *ChatSession) PlayAudioStream() {
+	session.ctrlCh <- StateRunning
 }
 
 func StopAudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
@@ -466,11 +495,52 @@ func StopAudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc
 			return
 		}
 
-		// 调用 session.stopAudioStream() 来停止音频流的处理
 		session.StopAudioStream()
 		log.Printf("音频流已停止, 会话 %s", sessionID)
 
 		w.Write([]byte("音频流已停止"))
+	}
+}
+
+func PauseAudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.URL.Query().Get("sessionid")
+		if sessionID == "" {
+			http.Error(w, "缺少 sessionid 参数", http.StatusBadRequest)
+			return
+		}
+
+		session := sessionManager.GetSession(sessionID)
+		if session == nil {
+			http.Error(w, "无效的 sessionid", http.StatusBadRequest)
+			return
+		}
+
+		session.PauseAudioStream()
+		log.Printf("音频流已暂停, 会话 %s", sessionID)
+
+		w.Write([]byte("音频流已暂停"))
+	}
+}
+
+func PlayAudioStreamHandler(sessionManager *ChatSessionManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.URL.Query().Get("sessionid")
+		if sessionID == "" {
+			http.Error(w, "缺少 sessionid 参数", http.StatusBadRequest)
+			return
+		}
+
+		session := sessionManager.GetSession(sessionID)
+		if session == nil {
+			http.Error(w, "无效的 sessionid", http.StatusBadRequest)
+			return
+		}
+
+		session.PlayAudioStream()
+		log.Printf("音频流正在播放, 会话 %s", sessionID)
+
+		w.Write([]byte("音频流正在播放"))
 	}
 }
 
@@ -519,4 +589,21 @@ func (session *ChatSession) CallOpenAI() (string, error) {
 		return "", err
 	}
 	return resp.Choices[0].Message.Content, nil
+}
+
+func withCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 设置跨域请求头
+		w.Header().Set("Access-Control-Allow-Origin", "*") // 或者设置为具体的域名，如 "http://example.com"
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		// 处理预检请求 (OPTIONS)
+		if r.Method == http.MethodOptions {
+			return
+		}
+
+		// 调用实际的处理程序
+		next(w, r)
+	}
 }

@@ -6,56 +6,64 @@ import (
 	"time"
 )
 
-// 通道默认会连续读取直到结束, 需借助另一个通道来实现暂停和断点续读
+// 定义状态常量
+const (
+	StateRunning = "running"
+	StatePaused  = "paused"
+	StateStopped = "stopped"
+)
+
+// 通道默认会连续读取直到结束, 需借助另一个通道来实现暂停、恢复和停止
 func main() {
 	dataCh := make(chan string, 10000)
-	ctrlCh := make(chan bool) // 通道控制变量(paused)
+	ctrlCh := make(chan string)
 	doneCh := make(chan struct{})
 
 	// 接收协程
 	go func() {
 		defer close(doneCh)
-		paused := false // 变量控制流程
+		state := StateRunning // 初始状态为运行
 
 		for {
-			if paused {
-				cmd := <-ctrlCh // 等待解除阻塞, 收到true下一轮重新阻塞, 收到false下一轮继续数据读取
-				paused = cmd
+			switch state {
+			case StatePaused:
+				state = <-ctrlCh // 等待阻塞解除信号
 				continue
-			}
-
-			select {
-			case <-ctrlCh:
-				paused = true
-			case data, ok := <-dataCh:
-				if !ok {
-					return
+			case StateStopped:
+				return
+			case StateRunning:
+				select {
+				case newState := <-ctrlCh:
+					state = newState
+				case data, ok := <-dataCh:
+					if !ok {
+						fmt.Println("========= 数据读取完毕，自然结束")
+						return
+					}
+					fmt.Println("处理数据:", data)
+					time.Sleep(time.Second)
 				}
-				fmt.Println(data)
-				time.Sleep(time.Second)
 			}
 		}
 	}()
 
 	// 控制协程
 	go func() {
-		fmt.Println("========= 运行3秒")
 		time.Sleep(3 * time.Second)
 
-		fmt.Println("========= 暂停3秒")
-		ctrlCh <- true // pause
+		ctrlCh <- StatePaused
 		time.Sleep(3 * time.Second)
 
-		fmt.Println("========= 运行3秒")
-		ctrlCh <- false // resume
+		ctrlCh <- StateRunning
 		time.Sleep(3 * time.Second)
 
-		fmt.Println("========= 暂停3秒")
-		ctrlCh <- true // pause
+		ctrlCh <- StatePaused
 		time.Sleep(3 * time.Second)
 
-		fmt.Println("========= 运行到结束")
-		ctrlCh <- false // resume
+		ctrlCh <- StateRunning
+		time.Sleep(2 * time.Second)
+
+		ctrlCh <- StateStopped
 	}()
 
 	// 发送协程
